@@ -5,7 +5,7 @@ from conan.errors import ConanInvalidConfiguration
 from conan.tools.apple import is_apple_os
 from conan.tools.build import cross_building
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
-from conan.tools.files import apply_conandata_patches, chdir, copy, export_conandata_patches, get, replace_in_file, rm, rmdir
+from conan.tools.files import apply_conandata_patches, chdir, copy, export_conandata_patches, get, replace_in_file, rm, rmdir, chmod
 from conan.tools.gnu import Autotools, AutotoolsDeps, AutotoolsToolchain
 from conan.tools.layout import basic_layout
 from conan.tools.microsoft import VCVars, is_msvc, is_msvc_static_runtime, NMakeToolchain, NMakeDeps
@@ -85,6 +85,9 @@ class SqlcipherConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
+        chmod(self, "autosetup/autosetup", execute=True)
+        chmod(self, "autosetup/autosetup-find-tclsh", execute=True)
+
 
     @property
     def _temp_store_nmake_value(self):
@@ -141,6 +144,16 @@ class SqlcipherConan(ConanFile):
     def _use_commoncrypto(self):
         return self.options.crypto_library == "commoncrypto" and is_apple_os(self)
 
+    def _configure_tempstore(self, tc):
+        if Version(self.version) > "4.6.1":
+            tc.configure_args += [
+                f"--with-tempstore={self._temp_store_autotools_value}"
+            ]
+        else:
+            tc.configure_args += [
+                f"--enable-tempstore={self._temp_store_autotools_value}"
+            ]
+
     def _generate_unix(self):
         env = VirtualBuildEnv(self)
         env.generate()
@@ -150,10 +163,13 @@ class SqlcipherConan(ConanFile):
             env.generate(scope="build")
 
         tc = AutotoolsToolchain(self)
+        tc.update_configure_args({
+            "--oldincludedir": None,  # remove this arg (SQLCipher/SQLite configure doesn't support it)
+        })
         tc.configure_args += [
-            f"--enable-tempstore={self._temp_store_autotools_value}",
             "--disable-tcl",
         ]
+        self._configure_tempstore(tc)
         if self.settings.os == "Windows":
             tc.configure_args += [
                 "config_BUILD_EXEEXT='.exe'",
@@ -165,6 +181,8 @@ class SqlcipherConan(ConanFile):
             if not self.options.with_largefile:
                 tc.extra_defines.append("SQLITE_DISABLE_LFS=1")
         tc.extra_defines.append("SQLITE_HAS_CODEC")
+        tc.extra_defines.append("SQLITE_EXTRA_INIT=sqlcipher_extra_init")
+        tc.extra_defines.append("SQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown")
 
         if self._use_commoncrypto:
             tc.extra_ldflags += [
@@ -203,7 +221,7 @@ class SqlcipherConan(ConanFile):
         configure = os.path.join(self.source_folder, "configure")
         self._chmod_plus_x(configure)
         # relocatable shared libs on macOS
-        replace_in_file(self, configure, "-install_name \\$rpath/", "-install_name @rpath/")
+        # replace_in_file(self, configure, "-install_name \\$rpath/", "-install_name @rpath/")
         # avoid SIP issues on macOS when dependencies are shared
         if is_apple_os(self):
             libdirs = sum([dep.cpp_info.libdirs for dep in self.dependencies.values()], [])
